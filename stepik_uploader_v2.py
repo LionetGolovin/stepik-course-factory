@@ -486,7 +486,7 @@ def parse_fill_blanks(body):
     for i, part in enumerate(parts):
         if i % 2 == 0:
             if part.strip():
-                components.append({"type": "text", "text": part})
+                components.append({"type": "text", "text": part, "options": []})
         else:
             key     = part
             answers = blanks.get(key, [key])
