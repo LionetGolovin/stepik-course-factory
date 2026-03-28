@@ -697,8 +697,34 @@ def main():
         print("  python3 stepik_uploader_v2.py курс.md --dry-run   # только превью")
         sys.exit(1)
 
-    filepath = sys.argv[1]
-    dry_run  = "--dry-run" in sys.argv
+    args = sys.argv[1:]
+
+    if not args:
+        print("Использование:")
+        print("  stepik_uploader_v2.py курс.md --keys keys.env")
+        print("  stepik_uploader_v2.py курс.md --keys keys.env --dry-run")
+        sys.exit(0)
+
+    filepath = next((a for a in args if not a.startswith("--")), None)
+    if not filepath:
+        print("❌ Не указан файл курса.")
+        sys.exit(1)
+
+    dry_run = "--dry-run" in args
+
+    keys_file = None
+    if "--keys" in args:
+        idx = args.index("--keys")
+        if idx + 1 < len(args) and not args[idx + 1].startswith("--"):
+            keys_file = args[idx + 1]
+        else:
+            print("❌ После --keys укажите путь к файлу.")
+            sys.exit(1)
+
+    if not dry_run and keys_file is None:
+        print("❌ Для загрузки нужен файл ключей: --keys keys.env")
+        print("   Для предпросмотра используйте: --dry-run")
+        sys.exit(1)
 
     if not Path(filepath).exists():
         print(f"❌ Файл не найден: {filepath}")
