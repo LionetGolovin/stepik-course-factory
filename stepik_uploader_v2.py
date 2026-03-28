@@ -229,10 +229,10 @@ def create_string_step(token, lesson_id, position, question_html,
 def create_free_answer_step(token, lesson_id, position, question_html,
                             min_words=None, max_words=None, peer_review=False):
     source = {"is_attachments_enabled": False, "is_html_enabled": True}
-    if min_words is not None:
-        source["min_words"] = int(min_words)
-    if max_words is not None:
-        source["max_words"] = int(max_words)
+#    if min_words is not None:
+#        source["min_words"] = int(min_words)
+#    if max_words is not None:
+#        source["max_words"] = int(max_words)
     if peer_review:
         source["manual_scoring"] = True
     block = {"name": "free-answer", "text": question_html, "source": source}
