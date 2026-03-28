@@ -1,7 +1,7 @@
 # Stepik Course Factory (SCF v2)
 
 > **Пишешь курс в Markdown — скрипт сам загружает его на Stepik.**  
-> Полная поддержка 9 типов шагов: от теории до сопоставлений и пропусков.
+> Полная поддержка 10 типов шагов: от теории до сопоставлений и пропусков.
 
 ---
 
@@ -36,7 +36,7 @@ pip install requests pyyaml markdown
 
 # Или через uv (macOS / быстрый старт)
 uv run --with requests --with pyyaml --with markdown \
-    stepik_uploader_v2.py --help
+    stepik_uploader_v2.py мой_курс.md --dry-run
 ```
 
 ### 3. Добавить ключи API
@@ -44,11 +44,20 @@ uv run --with requests --with pyyaml --with markdown \
 Получите ключи на [stepik.org/oauth2/applications](https://stepik.org/oauth2/applications)  
 (Тип приложения: **Confidential**, грант: **Client credentials**)
 
-Отредактируйте файл `keys.env`:
+**Способ 1 — файл `keys.env`** (рекомендуется):
 
 ```
-CLIENT_ID     = "ваш_client_id"
-CLIENT_SECRET = "ваш_client_secret"
+STEPIK_CLIENT_ID=ваш_client_id
+STEPIK_CLIENT_SECRET=ваш_client_secret
+```
+
+> ⚠️ Без пробелов вокруг `=` и без кавычек.
+
+**Способ 2 — переменные окружения:**
+
+```bash
+export STEPIK_CLIENT_ID=ваш_client_id
+export STEPIK_CLIENT_SECRET=ваш_client_secret
 ```
 
 ### 4. Заполнить шаблон курса
@@ -58,6 +67,7 @@ CLIENT_SECRET = "ваш_client_secret"
 ### 5. Проверить структуру (без загрузки)
 
 ```bash
+# --dry-run не требует ключей API
 python stepik_uploader_v2.py мой_курс.md --dry-run
 ```
 
@@ -84,20 +94,22 @@ python stepik_uploader_v2.py мой_курс.md --keys keys.env
 
 | Ключевое слово | Тип на Stepik | Описание |
 |----------------|---------------|----------|
-| `ТЕКСТ:`   | `text`         | Теоретический блок |
-| `ВЫБОР:`   | `choice`       | Один правильный ответ |
-| `МУЛЬТИ:`  | `choice`       | Несколько правильных ответов |
-| `ЧИСЛО:`   | `number`       | Числовой ответ |
-| `СТРОКА:`  | `string`       | Короткий текстовый ответ |
-| `ЭССЕ:`    | `free-answer`  | Развёрнутый ответ / эссе |
-| `ПОРЯДОК:` | `sorting`      | Расставить элементы по порядку |
-| `ПАРЫ:`    | `matching`     | Сопоставить два столбца |
-| `ПРОПУСКИ:` | `fill-blanks` | Заполнить пропуски в тексте |
+| `ТЕКСТ:`    | `text`         | Теоретический блок |
+| `ВЫБОР:`    | `choice`       | Один правильный ответ |
+| `МУЛЬТИ:`   | `choice multi` | Несколько правильных ответов |
+| `ЧИСЛО:`    | `number`       | Числовой ответ |
+| `СТРОКА:`   | `string`       | Короткий текстовый ответ |
+| `ЭССЕ:`     | `free-answer`  | Развёрнутый ответ / эссе |
+| `ПОРЯДОК:`  | `sorting`      | Расставить элементы по порядку |
+| `ПАРЫ:`     | `matching`     | Сопоставить два столбца |
+| `ПРОПУСКИ:` | `fill-blanks`  | Заполнить пропуски в тексте |
+| `ТАБЛИЦА:`  | `table`        | Таблица с чекбоксами для отметки ячеек |
 
 ### Параметры шагов
 
 Параметры задаются HTML-комментариями сразу после заголовка `####`:
 
+**ВЫБОР / МУЛЬТИ:**
 ```markdown
 #### ВЫБОР: Какое определение точнее?
 <!-- shuffle: true -->
@@ -109,19 +121,56 @@ python stepik_uploader_v2.py мой_курс.md --keys keys.env
 - [ ] Неверный вариант C
 ```
 
+**ЧИСЛО:**
 ```markdown
 #### ЧИСЛО: Сколько уровней в модели OSI?
 <!-- answer: 7 -->
 <!-- precision: 0 -->
-<!-- feedback-correct: Правильно — 7 уровней! -->
 ```
 
+**СТРОКА:**
+```markdown
+#### СТРОКА: Введите название протокола
+<!-- answer: HTTP -->
+<!-- answer-aliases: http | Http -->
+<!-- case-sensitive: false -->
+```
+
+**ЭССЕ:**
+```markdown
+#### ЭССЕ: Опишите подход к цифровой трансформации
+<!-- min-words: 50 -->
+<!-- max-words: 500 -->
+<!-- peer-review: true -->
+```
+
+**ПАРЫ:**
+```markdown
+#### ПАРЫ: Сопоставьте понятия
+<!-- shuffle-rows: true -->
+
+| Левый столбец | Правый столбец |
+|---------------|----------------|
+| Понятие А     | Определение 1  |
+| Понятие Б     | Определение 2  |
+```
+
+**ПРОПУСКИ:**
 ```markdown
 #### ПРОПУСКИ: Вставьте пропущенные слова
 <!-- blank: слово1 = системный | комплексный -->
 <!-- blank: слово2 = управлению | организации -->
 
 Это {слово1} подход к {слово2}.
+```
+
+**Описания секций и уроков:**
+```markdown
+## Модуль 1 — Введение
+<!-- section-description: Краткое описание модуля для студентов. -->
+
+### Урок 1.1 — Основные понятия
+<!-- lesson-description: Что узнает студент в этом уроке. -->
 ```
 
 ---
@@ -132,9 +181,11 @@ python stepik_uploader_v2.py мой_курс.md --keys keys.env
 # ЛИЧНЫЙ ФАЙЛ — НЕ ЗАГРУЖАТЬ НА GITHUB!
 # Получить: https://stepik.org/oauth2/applications
 
-CLIENT_ID     = "ваш_client_id"
-CLIENT_SECRET = "ваш_client_secret"
+STEPIK_CLIENT_ID=ваш_client_id
+STEPIK_CLIENT_SECRET=ваш_client_secret
 ```
+
+> ⚠️ Формат строгий: **без пробелов** вокруг `=`, **без кавычек**, имена ключей точно как выше.
 
 **Безопасность:** добавьте в `.gitignore`:
 ```bash
@@ -146,22 +197,28 @@ echo "keys.env" >> .gitignore
 ## ⌨️ Параметры командной строки
 
 ```
-stepik_uploader_v2.py курс.md [--keys keys.env] [--dry-run] [--help]
+stepik_uploader_v2.py курс.md [--keys FILE] [--dry-run]
 
   курс.md        Путь к MD-файлу курса в формате SCF v2
-  --keys FILE    Путь к файлу ключей API (обязателен для загрузки)
+  --keys FILE    Путь к файлу ключей API (нужен только для загрузки)
   --dry-run      Предпросмотр структуры без загрузки на Stepik
-  --help         Показать справку
 ```
+
+> Вместо `--keys` можно задать переменные окружения `STEPIK_CLIENT_ID` и `STEPIK_CLIENT_SECRET`.
 
 ### Примеры
 
 ```bash
-# Только предпросмотр — ключи не нужны
+# Предпросмотр — ключи не нужны
 python stepik_uploader_v2.py мой_курс.md --dry-run
 
-# Загрузка с ключами
+# Загрузка с файлом ключей
 python stepik_uploader_v2.py мой_курс.md --keys keys.env
+
+# Загрузка через переменные окружения
+export STEPIK_CLIENT_ID=...
+export STEPIK_CLIENT_SECRET=...
+python stepik_uploader_v2.py мой_курс.md
 
 # macOS + uv (все зависимости автоматически)
 uv run --with requests --with pyyaml --with markdown \
@@ -173,27 +230,29 @@ uv run --with requests --with pyyaml --with markdown \
 ## 📋 Пример вывода `--dry-run`
 
 ```
-Читаю файл: мой_курс.md
+📄 Читаю файл: мой_курс.md
 
-==============================================================
+══════════════════════════════════════════════════════════════
   ПРЕДПРОСМОТР КУРСА
-==============================================================
+══════════════════════════════════════════════════════════════
   Название : Основы цифровой трансформации
   Summary  : Для кого курс, чему научит, какой главный результат...
   Язык     : ru
-  Модулей  : 3  |  Уроков: 11  |  Шагов: 25
+  Модулей  : 3
+  Уроков   : 11
+  Шагов    : 25
 
-  [1] Модуль 1 — Введение в тему
-       [1.1] Урок 1.1 — Что такое [Тема] и зачем  [textx3]
-       [1.2] Урок 1.2 — История и тренды          [textx3]
-  [2] Модуль 2 — Практика и инструменты
-       [2.1] Урок 2.1 — Инструмент №1             [choicex1, textx1]
+  📦 [1] Модуль 1 — Введение в тему
+       📖 [1.1] Урок 1.1 — Что такое [Тема]  [text×3]
+       📖 [1.2] Урок 1.2 — История и тренды  [text×2, choice×1]
+  📦 [2] Модуль 2 — Практика
+       📖 [2.1] Урок 2.1 — Инструмент №1     [text×1, choice×1]
        ...
 
-  Типы шагов итого: {text: 17, choice: 1, multi: 1, ...}
-==============================================================
+  Типы шагов итого: {'text': 17, 'choice': 3, 'matching': 2, ...}
+══════════════════════════════════════════════════════════════
 
-  --dry-run: загрузка не выполняется.
+ℹ️  Режим --dry-run: загрузка не выполняется.
 ```
 
 ---
@@ -234,39 +293,43 @@ python -c "import requests, yaml, markdown; print('OK')"
 ## 🏗 Архитектура скрипта
 
 ```
-stepik_uploader_v2.py  (699 строк, 31 функция)
+stepik_uploader_v2.py  (944 строки, 33 функции)
 │
-├── load_keys()             # Загрузка ключей из keys.env
+├── load_credentials(keys_file)  # Загрузка ключей из файла или env-переменных
 │
 ├── API-слой
-│   ├── get_token()
-│   ├── api_post()
+│   ├── get_token(client_id, client_secret)
+│   ├── api_post()               # С timeout и exponential backoff retry
 │   ├── create_course/section/lesson/unit()
-│   └── _post_step() / _base()
+│   └── _post_step() / _step_base()
 │
 ├── Билдеры payload (по типу шага)
 │   ├── create_text_step()
-│   ├── create_choice_step()
+│   ├── create_choice_step()     # + feedback_correct / feedback_wrong
 │   ├── create_number_step()
 │   ├── create_string_step()
-│   ├── create_free_answer_step()
+│   ├── create_free_answer_step() # + min_words / max_words / peer_review
 │   ├── create_sorting_step()
-│   ├── create_matching_step()
-│   └── create_fill_blanks_step()
+│   ├── create_matching_step()   # + shuffle_rows
+│   ├── create_fill_blanks_step()
+│   └── create_table_step()      # Новый тип: таблица с чекбоксами
 │
 ├── Парсер SCF v2
-│   ├── parse_md_file()         # Главный парсер иерархии
-│   ├── parse_frontmatter()     # YAML метаданные
-│   ├── detect_step_type()      # Определение типа по ключевому слову
-│   ├── parse_choice_options()  # [ ] / [x] варианты
-│   ├── parse_sorting_options() # [N] порядок
-│   ├── parse_matching_pairs()  # MD-таблица пар
-│   └── parse_fill_blanks()     # {пропуски} + <!-- blank -->
+│   ├── parse_md_file()          # Главный парсер иерархии (# → ## → ### → ####)
+│   ├── parse_frontmatter()      # YAML метаданные + #-комментарии
+│   ├── strip_template_comments()
+│   ├── detect_step_type()       # Определение типа по ключевому слову
+│   ├── extract_params()         # <!-- key: value --> параметры
+│   ├── clean_option_text()      # Удаление шаблонных маркеров
+│   ├── parse_choice_options()   # [ ] / [x] варианты
+│   ├── parse_sorting_options()  # [N] порядок
+│   ├── parse_matching_pairs()   # MD-таблица пар (по позиции строк)
+│   └── parse_fill_blanks()      # {пропуски} + <!-- blank -->
 │
 └── Оркестратор
-    ├── upload_step()     # Диспетчер по типу
-    ├── upload_course()   # Полный цикл загрузки
-    ├── print_preview()   # Вывод dry-run
+    ├── upload_step()    # Диспетчер по типу
+    ├── upload_course()  # Полный цикл загрузки
+    ├── print_preview()  # Вывод dry-run
     └── main()
 ```
 
