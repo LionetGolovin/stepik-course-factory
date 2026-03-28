@@ -13,17 +13,24 @@ stepik_uploader_v2.py — Загрузчик курсов SCF v2 на Stepik
   ПОРЯДОК  → sorting
   ПАРЫ     → matching
   ПРОПУСКИ → fill-blanks
+  ТАБЛИЦА  → table
 
 Иерархия файла:  # Курс  →  ## Модуль  →  ### Урок  →  #### Шаг
 
 Использование:
-    python3 stepik_uploader_v2.py курс.md           # интерактивная загрузка
-    python3 stepik_uploader_v2.py курс.md --dry-run # только предпросмотр
+    python3 stepik_uploader_v2.py курс.md --keys keys.env           # загрузка
+    python3 stepik_uploader_v2.py курс.md --keys keys.env --dry-run # предпросмотр
+
+    keys.env содержит две строки:
+        STEPIK_CLIENT_ID=ВАШ_ID
+        STEPIK_CLIENT_SECRET=ВАШ_SECRET
+    Получить ключи: https://stepik.org/oauth2/applications/
 
 Требования:
     pip install requests pyyaml markdown
 """
 
+import os
 import sys
 import re
 import time
@@ -32,24 +39,54 @@ import yaml
 import markdown as md_lib
 from pathlib import Path
 
-# ─── ВАШИ КЛЮЧИ: получить на https://stepik.org/oauth2/applications/ ──────────
-CLIENT_ID     = "ВАШ_CLIENT_ID"
-CLIENT_SECRET = "ВАШ_CLIENT_SECRET"
-# ──────────────────────────────────────────────────────────────────────────────
-
 BASE_URL      = "https://stepik.org"
 REQUEST_DELAY = 0.4   # секунды между запросами (не менее 0.3 во избежание rate-limit)
+API_TIMEOUT   = 30    # [WARN-02] таймаут HTTP-запросов в секундах
+API_RETRIES   = 3     # [WARN-03] количество попыток при 429/5xx
 
 
 # ════════════════════════════════════════════════════════════════
 #  АВТОРИЗАЦИЯ И БАЗОВЫЕ ВЫЗОВЫ
 # ════════════════════════════════════════════════════════════════
 
-def get_token():
+def load_credentials(keys_file=None):
+    """
+    [BUG-01 / CODE-01 / WARN-04] Читает CLIENT_ID и CLIENT_SECRET из:
+      1. keys_file (--keys путь/к/keys.env)
+      2. Переменных окружения STEPIK_CLIENT_ID / STEPIK_CLIENT_SECRET
+    Если ни один источник не задан — завершается с понятной ошибкой.
+    """
+    client_id     = os.environ.get("STEPIK_CLIENT_ID", "")
+    client_secret = os.environ.get("STEPIK_CLIENT_SECRET", "")
+
+    if keys_file:
+        kp = Path(keys_file)
+        if not kp.exists():
+            print(f"❌ Файл ключей не найден: {keys_file}")
+            sys.exit(1)
+        for line in kp.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("STEPIK_CLIENT_ID="):
+                client_id = line.split("=", 1)[1].strip()
+            elif line.startswith("STEPIK_CLIENT_SECRET="):
+                client_secret = line.split("=", 1)[1].strip()
+
+    if not client_id or not client_secret:
+        print("❌ Не найдены API-ключи Stepik.")
+        print("   Укажите через: --keys keys.env")
+        print("   или через переменные окружения STEPIK_CLIENT_ID / STEPIK_CLIENT_SECRET")
+        sys.exit(1)
+
+    return client_id, client_secret
+
+
+def get_token(client_id, client_secret):
+    """[BUG-01] Принимает credentials явно — не использует глобальные константы."""
     resp = requests.post(
         f"{BASE_URL}/oauth2/token/",
         data={"grant_type": "client_credentials"},
-        auth=(CLIENT_ID, CLIENT_SECRET)
+        auth=(client_id, client_secret),
+        timeout=API_TIMEOUT,
     )
     resp.raise_for_status()
     print("✅ Авторизация успешна")
@@ -57,13 +94,37 @@ def get_token():
 
 
 def api_post(token, endpoint, payload):
+    """[WARN-02][WARN-03] Добавлен timeout и exponential backoff retry на 429/5xx."""
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.post(f"{BASE_URL}/api/{endpoint}", headers=headers, json=payload)
-    if not resp.ok:
-        print(f"❌ Ошибка {resp.status_code} [{endpoint}]: {resp.text[:500]}")
-        resp.raise_for_status()
-    time.sleep(REQUEST_DELAY)
-    return resp.json()
+    for attempt in range(API_RETRIES):
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/api/{endpoint}",
+                headers=headers,
+                json=payload,
+                timeout=API_TIMEOUT,
+            )
+        except requests.exceptions.Timeout:
+            wait = 2 ** attempt
+            print(f"⏳ Таймаут [{endpoint}], повтор через {wait}с (попытка {attempt+1}/{API_RETRIES})")
+            time.sleep(wait)
+            continue
+
+        if resp.status_code == 429 or resp.status_code >= 500:
+            wait = 2 ** attempt
+            print(f"⏳ {resp.status_code} [{endpoint}], повтор через {wait}с (попытка {attempt+1}/{API_RETRIES})")
+            time.sleep(wait)
+            continue
+
+        if not resp.ok:
+            print(f"❌ Ошибка {resp.status_code} [{endpoint}]: {resp.text[:500]}")
+            resp.raise_for_status()
+
+        time.sleep(REQUEST_DELAY)
+        return resp.json()
+
+    print(f"❌ Все {API_RETRIES} попытки исчерпаны для [{endpoint}]")
+    raise RuntimeError(f"API endpoint {endpoint} недоступен после {API_RETRIES} попыток")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -79,17 +140,21 @@ def create_course(token, title, summary, language="ru"):
     return cid
 
 
-def create_section(token, course_id, title, position):
-    data = api_post(token, "sections", {
-        "section": {"title": title, "course": course_id, "position": position}
-    })
+def create_section(token, course_id, title, position, description=""):
+    """[MISS-03] Добавлен параметр description для передачи section-description."""
+    payload = {"title": title, "course": course_id, "position": position}
+    if description:
+        payload["description"] = description
+    data = api_post(token, "sections", {"section": payload})
     return data["sections"][0]["id"]
 
 
-def create_lesson(token, title):
-    data = api_post(token, "lessons", {
-        "lesson": {"title": title, "language": "ru"}
-    })
+def create_lesson(token, title, description=""):
+    """[MISS-03] Добавлен параметр description для передачи lesson-description."""
+    payload = {"title": title, "language": "ru"}
+    if description:
+        payload["description"] = description
+    data = api_post(token, "lessons", {"lesson": payload})
     return data["lessons"][0]["id"]
 
 
@@ -120,27 +185,31 @@ def create_text_step(token, lesson_id, position, title, html):
 
 
 def create_choice_step(token, lesson_id, position, question_html,
-                       options_data, is_multiple=False, preserve_order=True):
+                       options_data, is_multiple=False, preserve_order=True,
+                       feedback_correct="", feedback_wrong=""):
     """
-    options_data: [{"text": str, "is_correct": bool, "feedback": str}, ...]
+    [MISS-02] Добавлены feedback_correct / feedback_wrong.
+    options_ [{"text": str, "is_correct": bool, "feedback": str}, ...]
     """
-    block = {
-        "name": "choice",
-        "text": question_html,
-        "source": {
-            "options": [
-                {"is_correct": o["is_correct"], "text": o["text"],
-                 "feedback": o.get("feedback", "")}
-                for o in options_data
-            ],
-            "is_always_correct":  False,
-            "is_html_enabled":    True,
-            "sample_size":        len(options_data),
-            "is_multiple_choice": is_multiple,
-            "preserve_order":     preserve_order,
-            "is_options_feedback": False,
-        }
+    source = {
+        "options": [
+            {"is_correct": o["is_correct"], "text": o["text"],
+             "feedback": o.get("feedback", "")}
+            for o in options_data
+        ],
+        "is_always_correct":  False,
+        "is_html_enabled":    True,
+        "sample_size":        len(options_data),
+        "is_multiple_choice": is_multiple,
+        "preserve_order":     preserve_order,
+        "is_options_feedback": False,
     }
+    if feedback_correct:
+        source["feedback_correct"] = feedback_correct
+    if feedback_wrong:
+        source["feedback_wrong"] = feedback_wrong
+
+    block = {"name": "choice", "text": question_html, "source": source}
     return _post_step(token, _step_base(lesson_id, position, block))
 
 
@@ -155,9 +224,7 @@ def create_number_step(token, lesson_id, position, question_html, answer, max_er
 
 def create_string_step(token, lesson_id, position, question_html,
                        answer, aliases=None, case_sensitive=False):
-    """
-    Несколько допустимых ответов объединяются regex-паттерном через |.
-    """
+    """Несколько допустимых ответов объединяются regex-паттерном через |."""
     all_answers = [answer] + (aliases or [])
     escaped = [re.escape(a.strip()) for a in all_answers if a.strip()]
     pattern = "|".join(escaped) if len(escaped) > 1 else (escaped[0] if escaped else answer)
@@ -169,12 +236,17 @@ def create_string_step(token, lesson_id, position, question_html,
     return _post_step(token, _step_base(lesson_id, position, block))
 
 
-def create_free_answer_step(token, lesson_id, position, question_html):
-    block = {
-        "name": "free-answer",
-        "text": question_html,
-        "source": {"is_attachments_enabled": False, "is_html_enabled": True}
-    }
+def create_free_answer_step(token, lesson_id, position, question_html,
+                            min_words=None, max_words=None, peer_review=False):
+    """[MISS-04] Добавлены min_words, max_words, peer_review."""
+    source = {"is_attachments_enabled": False, "is_html_enabled": True}
+    if min_words is not None:
+        source["min_words"] = int(min_words)
+    if max_words is not None:
+        source["max_words"] = int(max_words)
+    if peer_review:
+        source["manual_scoring"] = True
+    block = {"name": "free-answer", "text": question_html, "source": source}
     return _post_step(token, _step_base(lesson_id, position, block))
 
 
@@ -188,13 +260,14 @@ def create_sorting_step(token, lesson_id, position, question_html, options_order
     return _post_step(token, _step_base(lesson_id, position, block))
 
 
-def create_matching_step(token, lesson_id, position, question_html, pairs):
-    """pairs: [{"first": str, "second": str}, ...]"""
-    block = {
-        "name": "matching",
-        "text": question_html,
-        "source": {"pairs": [{"first": p["first"], "second": p["second"]} for p in pairs]}
-    }
+def create_matching_step(token, lesson_id, position, question_html, pairs,
+                         shuffle_rows=False):
+    """[MISS-05] Добавлен параметр shuffle_rows."""
+    source = {"pairs": [{"first": p["first"], "second": p["second"]} for p in pairs]}
+    if shuffle_rows:
+        source["is_options_feedback"] = False
+        source["preserve_order"] = False
+    block = {"name": "matching", "text": question_html, "source": source}
     return _post_step(token, _step_base(lesson_id, position, block))
 
 
@@ -210,6 +283,35 @@ def create_fill_blanks_step(token, lesson_id, position, question_html, component
         "name": "fill-blanks",
         "text": question_html,
         "source": {"components": components}
+    }
+    return _post_step(token, _step_base(lesson_id, position, block))
+
+
+def create_table_step(token, lesson_id, position, question_html, rows, cols,
+                      correct_cells=None):
+    """
+    [MISS-01] Тип ТАБЛИЦА — шаг с сеткой ячеек для отметки.
+    rows: список заголовков строк (list[str])
+    cols: список заголовков столбцов (list[str])
+    correct_cells: список [row_idx, col_idx] правильных ячеек (нумерация с 0)
+    """
+    correct_cells = correct_cells or []
+    cell_list = []
+    for r_i, row in enumerate(rows):
+        for c_i, col in enumerate(cols):
+            cell_list.append({
+                "name": f"{row} / {col}",
+                "is_correct": [r_i, c_i] in correct_cells,
+            })
+    block = {
+        "name": "table",
+        "text": question_html,
+        "source": {
+            "columns": [{"name": c} for c in cols],
+            "rows": [{"name": r} for r in rows],
+            "options": cell_list,
+            "is_checkbox": True,
+        }
     }
     return _post_step(token, _step_base(lesson_id, position, block))
 
@@ -264,7 +366,6 @@ def extract_params(text):
         key = m.group(1).lower()
         val = m.group(2).strip()
         if key == 'blank':
-            # blank встречается несколько раз — собираем в список
             params.setdefault('_blanks', []).append(val)
         else:
             params[key] = val
@@ -272,10 +373,16 @@ def extract_params(text):
 
 
 def clean_option_text(text):
-    """Убирает подсказки-маркеры из текста варианта ответа."""
+    """
+    [WARN-05] Расширен список паттернов для очистки шаблонных маркеров.
+    Убирает подсказки из текста варианта ответа.
+    """
     text = re.sub(r'\s*—\s*\*\*правильный\s*ответ.*?\*\*.*$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\s*—\s*\*\*правильн.*?\*\*.*$',           '', text, flags=re.IGNORECASE)
-    text = re.sub(r':\s*(относится|неправильный|правильный).*$','', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*[—–-]\s*(относится|неправильный|правильный|распространённое).*$',
+                  '', text, flags=re.IGNORECASE)
+    text = re.sub(r':\s*(относится|неправильный|правильный|это признак|это следствие|это последствие).*$',
+                  '', text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -293,6 +400,7 @@ STEP_TYPE_MAP = {
     'порядок':  'sorting',
     'пары':     'matching',
     'пропуски': 'fill-blanks',
+    'таблица':  'table',      # [MISS-01]
 }
 
 
@@ -360,16 +468,15 @@ def parse_sorting_options(body):
 
 def parse_matching_pairs(body):
     """
-    Разбирает MD-таблицу (2 столбца) на список пар {"first": ..., "second": ...}.
-    Пропускает заголовок и разделитель таблицы.
+    [WARN-01] Заголовок таблицы определяется по строке-разделителю |---|---|,
+    а не по словарному матчингу ключевых слов.
     Возвращает (question_html, pairs).
     """
     lines = body.strip().split('\n')
-    pairs, q_lines, in_table = [], [], False
-
-    HEADER_PATTERNS = re.compile(
-        r'(левый столбец|правый столбец|роль|понятие|проблема|элемент)', re.IGNORECASE
-    )
+    pairs, q_lines = [], []
+    in_table     = False
+    header_found = False  # первая строка таблицы — заголовок
+    sep_found    = False  # вторая строка — разделитель |---|
 
     for line in lines:
         if re.match(r'^\s*\|', line):
@@ -378,9 +485,15 @@ def parse_matching_pairs(body):
             if len(cells) < 2:
                 continue
             left, right = cells[0].strip(), cells[1].strip()
-            # Пропускаем заголовок таблицы и строку-разделитель ---
-            if re.match(r'^[-:\s]+$', left) or HEADER_PATTERNS.search(left):
+
+            if not header_found:
+                header_found = True
                 continue
+
+            if not sep_found:
+                sep_found = True
+                continue
+
             if left and right:
                 pairs.append({"first": left, "second": right})
         elif not in_table and not re.match(r'^<!--', line) and not re.match(r'^#\s', line):
@@ -402,7 +515,6 @@ def parse_fill_blanks(body):
     """
     params = extract_params(body)
 
-    # Словарь допустимых ответов для каждого пропуска
     blanks = {}
     for raw in params.get('_blanks', []):
         m = re.match(r'(.+?)\s*=\s*(.+)', raw)
@@ -411,26 +523,24 @@ def parse_fill_blanks(body):
             answers = [a.strip() for a in m.group(2).split('|') if a.strip()]
             blanks[key] = answers
 
-    # Извлекаем «чистый» текст (без HTML-комментариев и строк-комментариев)
     text_lines = [
         l for l in body.split('\n')
         if not re.match(r'^\s*<!--', l) and not re.match(r'^#\s', l)
     ]
     fill_text = '\n'.join(text_lines).strip()
 
-    # Разбиваем на сегменты: текст / {пропуск} / текст ...
     components = []
     parts = re.split(r'\{(\w+)\}', fill_text)
     for i, part in enumerate(parts):
-        if i % 2 == 0:          # чётные — текстовые сегменты
+        if i % 2 == 0:
             if part.strip():
                 components.append({"type": "text", "text": part})
-        else:                    # нечётные — пропуски
+        else:
             key     = part
             answers = blanks.get(key, [key])
             components.append({"type": "input", "options": answers})
 
-    return "", components   # intro_html пустой — текст уже в components
+    return "", components
 
 
 # ════════════════════════════════════════════════════════════════
@@ -443,9 +553,9 @@ def parse_md_file(filepath):
     {
       title, summary, language,
       modules: [
-        { title,
+        { title, description,
           lessons: [
-            { title,
+            { title, description,
               steps: [ {type, title, body, params} ] }
           ]
         }
@@ -456,7 +566,6 @@ def parse_md_file(filepath):
     meta, body = parse_frontmatter(content)
     body = strip_template_comments(body)
 
-    # ── Метаданные ────────────────────────────────────────────────────────────
     course_title = str(meta.get('title', '')).strip()
     if not course_title:
         h1 = re.search(r'^#\s+(.+)$', body, re.MULTILINE)
@@ -473,7 +582,6 @@ def parse_md_file(filepath):
     course_summary  = raw_summary[:255] if raw_summary else course_title
     course_language = str(meta.get('language', 'ru')).strip()
 
-    # ── Модули (##) ───────────────────────────────────────────────────────────
     mod_re      = re.compile(r'^##\s+(.+)$', re.MULTILINE)
     mod_matches = list(mod_re.finditer(body))
 
@@ -488,7 +596,10 @@ def parse_md_file(filepath):
         m_end     = mod_matches[mi + 1].start() if mi + 1 < len(mod_matches) else len(body)
         mod_body  = body[m_start:m_end].strip()
 
-        # ── Уроки (###) ───────────────────────────────────────────────────────
+        # [MISS-03] Извлекаем section-description из первого <!-- --> после ## заголовка
+        sec_desc_m = re.match(r'\s*<!--\s*section-description\s*:\s*(.*?)\s*-->', mod_body, re.DOTALL)
+        sec_desc   = sec_desc_m.group(1).strip() if sec_desc_m else ""
+
         les_re      = re.compile(r'^###\s+(.+)$', re.MULTILINE)
         les_matches = list(les_re.finditer(mod_body))
 
@@ -499,7 +610,10 @@ def parse_md_file(filepath):
             l_end     = les_matches[li + 1].start() if li + 1 < len(les_matches) else len(mod_body)
             les_body  = mod_body[l_start:l_end].strip()
 
-            # ── Шаги (####) ───────────────────────────────────────────────────
+            # [MISS-03] Извлекаем lesson-description
+            les_desc_m = re.match(r'\s*<!--\s*lesson-description\s*:\s*(.*?)\s*-->', les_body, re.DOTALL)
+            les_desc   = les_desc_m.group(1).strip() if les_desc_m else ""
+
             step_re      = re.compile(r'^####\s+(.+)$', re.MULTILINE)
             step_matches = list(step_re.finditer(les_body))
 
@@ -523,9 +637,9 @@ def parse_md_file(filepath):
                         "params": extract_params(step_body),
                     })
 
-            lessons.append({"title": les_title, "steps": steps})
+            lessons.append({"title": les_title, "description": les_desc, "steps": steps})
 
-        modules.append({"title": mod_title, "lessons": lessons})
+        modules.append({"title": mod_title, "description": sec_desc, "lessons": lessons})
 
     return {"title": course_title, "summary": course_summary,
             "language": course_language, "modules": modules}
@@ -540,31 +654,40 @@ def upload_step(token, lesson_id, position, step):
     title  = step["title"]
     body   = step["body"]
     params = step["params"]
+    step_id = None  # [CODE-03] инициализация
 
     # ── ТЕКСТ ─────────────────────────────────────────────────────────────────
     if stype == "text":
-        html     = md_to_html(body)
-        step_id  = create_text_step(token, lesson_id, position, title, html)
+        html    = md_to_html(body)
+        step_id = create_text_step(token, lesson_id, position, title, html)
         print(f"      ✏️   [{position}] ТЕКСТ    : {title[:55]}")
 
     # ── ВЫБОР / МУЛЬТИ ────────────────────────────────────────────────────────
     elif stype in ("choice", "multi"):
         q_html, options = parse_choice_options(body)
-        is_multiple     = (stype == "multi")
-        preserve        = params.get("shuffle", "false").lower() != "true"
-        step_id         = create_choice_step(token, lesson_id, position, q_html,
-                                             options, is_multiple, preserve)
-        kind    = "МУЛЬТИ" if is_multiple else "ВЫБОР"
-        n_ok    = sum(1 for o in options if o["is_correct"])
+        # [CODE-02] валидация пустых вариантов
+        if not options:
+            print(f"      ⚠️   [{position}] {stype.upper():6s}: нет вариантов ответа в '{title[:45]}' — пропущен")
+            return None
+        is_multiple = (stype == "multi")
+        preserve    = params.get("shuffle", "false").lower() != "true"
+        fb_ok       = params.get("feedback-correct", "")   # [MISS-02]
+        fb_err      = params.get("feedback-wrong", "")     # [MISS-02]
+        step_id     = create_choice_step(
+            token, lesson_id, position, q_html,
+            options, is_multiple, preserve, fb_ok, fb_err
+        )
+        kind  = "МУЛЬТИ" if is_multiple else "ВЫБОР"
+        n_ok  = sum(1 for o in options if o["is_correct"])
         print(f"      ✅   [{position}] {kind:6s}   : {title[:45]} "
               f"({len(options)} вар., {n_ok} верных)")
 
     # ── ЧИСЛО ─────────────────────────────────────────────────────────────────
     elif stype == "number":
-        q_html    = md_to_html(re.sub(r'<!--.*?-->', '', body, flags=re.DOTALL).strip())
-        answer    = params.get("answer", "0")
-        max_err   = params.get("precision", "0")
-        step_id   = create_number_step(token, lesson_id, position, q_html, answer, max_err)
+        q_html  = md_to_html(re.sub(r'<!--.*?-->', '', body, flags=re.DOTALL).strip())
+        answer  = params.get("answer", "0")
+        max_err = params.get("precision", "0")
+        step_id = create_number_step(token, lesson_id, position, q_html, answer, max_err)
         print(f"      🔢   [{position}] ЧИСЛО    : {title[:50]} (ответ: {answer})")
 
     # ── СТРОКА ────────────────────────────────────────────────────────────────
@@ -581,7 +704,13 @@ def upload_step(token, lesson_id, position, step):
     # ── ЭССЕ ──────────────────────────────────────────────────────────────────
     elif stype == "free-answer":
         q_html  = md_to_html(re.sub(r'<!--.*?-->', '', body, flags=re.DOTALL).strip())
-        step_id = create_free_answer_step(token, lesson_id, position, q_html)
+        # [MISS-04] передаём min-words, max-words, peer-review
+        min_w   = params.get("min-words")
+        max_w   = params.get("max-words")
+        peer    = params.get("peer-review", "false").lower() == "true"
+        step_id = create_free_answer_step(
+            token, lesson_id, position, q_html, min_w, max_w, peer
+        )
         print(f"      📝   [{position}] ЭССЕ     : {title[:55]}")
 
     # ── ПОРЯДОК ───────────────────────────────────────────────────────────────
@@ -593,28 +722,48 @@ def upload_step(token, lesson_id, position, step):
     # ── ПАРЫ ──────────────────────────────────────────────────────────────────
     elif stype == "matching":
         q_html, pairs = parse_matching_pairs(body)
-        step_id       = create_matching_step(token, lesson_id, position, q_html, pairs)
+        # [MISS-05] передаём shuffle-rows
+        shuffle_r = params.get("shuffle-rows", "false").lower() == "true"
+        step_id   = create_matching_step(token, lesson_id, position, q_html, pairs, shuffle_r)
         print(f"      🔗   [{position}] ПАРЫ     : {title[:50]} ({len(pairs)} пар)")
 
     # ── ПРОПУСКИ ──────────────────────────────────────────────────────────────
     elif stype == "fill-blanks":
         intro_html, components = parse_fill_blanks(body)
         n_blanks = sum(1 for c in components if c["type"] == "input")
-        step_id  = create_fill_blanks_step(token, lesson_id, position,
-                                           intro_html, components)
-        print(f"      ___  [{position}] ПРОПУСКИ : {title[:47]} ({n_blanks} пропусков)")
+        step_id  = create_fill_blanks_step(token, lesson_id, position, intro_html, components)
+        print(f"      🔲   [{position}] ПРОПУСКИ : {title[:46]} ({n_blanks} пропусков)")
 
-    # ── НЕИЗВЕСТНЫЙ ТИП → fallback text ──────────────────────────────────────
+    # ── ТАБЛИЦА ───────────────────────────────────────────────────────────────
+    elif stype == "table":
+        # [MISS-01] Новый тип: парсим MD-таблицу как матрицу строк/столбцов
+        q_html, pairs = parse_matching_pairs(body)
+        rows = list(dict.fromkeys(p["first"]  for p in pairs))
+        cols = list(dict.fromkeys(p["second"] for p in pairs))
+        correct_raw = params.get("correct", "")
+        correct_cells = []
+        for cell in correct_raw.split(";"):
+            cell = cell.strip()
+            parts = cell.split(",")
+            if len(parts) == 2:
+                try:
+                    correct_cells.append([int(parts[0]), int(parts[1])])
+                except ValueError:
+                    pass
+        step_id = create_table_step(token, lesson_id, position, q_html,
+                                    rows, cols, correct_cells)
+        print(f"      🗂️   [{position}] ТАБЛИЦА  : {title[:48]} ({len(rows)}×{len(cols)})")
+
     else:
         html    = md_to_html(body)
         step_id = create_text_step(token, lesson_id, position, title, html)
-        print(f"      ❓   [{position}] UNKNOWN({stype}) → загружен как ТЕКСТ: {title[:40]}")
+        print(f"      ⚠️   [{position}] НЕИЗВ.   : '{stype}' → загружен как ТЕКСТ: {title[:40]}")
 
     return step_id
 
 
 # ════════════════════════════════════════════════════════════════
-#  ПОЛНЫЙ ЦИКЛ ЗАГРУЗКИ КУРСА
+#  ЗАГРУЗКА КУРСА
 # ════════════════════════════════════════════════════════════════
 
 def upload_course(token, course_data):
@@ -629,13 +778,21 @@ def upload_course(token, course_data):
     stats = {"modules": 0, "lessons": 0, "steps": 0, "by_type": {}}
 
     for mi, module in enumerate(course_data["modules"]):
-        sec_id = create_section(token, course_id, module["title"], mi + 1)
+        # [MISS-03] передаём description модуля
+        sec_id = create_section(
+            token, course_id, module["title"], mi + 1,
+            description=module.get("description", "")
+        )
         stats["modules"] += 1
         print(f"\n  📦 Модуль {mi + 1}: {module['title']}")
         time.sleep(0.5)
 
         for li, lesson in enumerate(module["lessons"]):
-            les_id = create_lesson(token, lesson["title"])
+            # [MISS-03] передаём description урока
+            les_id = create_lesson(
+                token, lesson["title"],
+                description=lesson.get("description", "")
+            )
             create_unit(token, sec_id, les_id, li + 1)
             stats["lessons"] += 1
             print(f"    📖 Урок {mi+1}.{li+1}: {lesson['title'][:60]} "
@@ -661,7 +818,9 @@ def print_preview(course_data):
     print(f"  ПРЕДПРОСМОТР КУРСА")
     print(SEP)
     print(f"  Название : {course_data['title']}")
-    print(f"  Summary  : {course_data['summary'][:72]}...")
+    # [WARN-06] Не добавляем "..." если summary короче 72 символов
+    s = course_data['summary']
+    print(f"  Summary  : {s[:72]}{('...' if len(s) > 72 else '')}")
     print(f"  Язык     : {course_data.get('language', 'ru')}")
     total_l = sum(len(m['lessons']) for m in course_data['modules'])
     total_s = sum(len(l['steps']) for m in course_data['modules']
@@ -691,18 +850,20 @@ def print_preview(course_data):
 # ════════════════════════════════════════════════════════════════
 
 def main():
-    if len(sys.argv) < 2:
-        print("Использование:")
-        print("  python3 stepik_uploader_v2.py курс.md             # загрузить")
-        print("  python3 stepik_uploader_v2.py курс.md --dry-run   # только превью")
-        sys.exit(1)
-
+    # [BUG-02] Единственная проверка аргументов, единый help-текст
     args = sys.argv[1:]
-
     if not args:
         print("Использование:")
-        print("  stepik_uploader_v2.py курс.md --keys keys.env")
-        print("  stepik_uploader_v2.py курс.md --keys keys.env --dry-run")
+        print("  python3 stepik_uploader_v2.py курс.md --keys keys.env")
+        print("  python3 stepik_uploader_v2.py курс.md --keys keys.env --dry-run")
+        print()
+        print("  keys.env содержит:")
+        print("    STEPIK_CLIENT_ID=ВАШ_ID")
+        print("    STEPIK_CLIENT_SECRET=ВАШ_SECRET")
+        print()
+        print("  Также можно задать переменные окружения:")
+        print("    export STEPIK_CLIENT_ID=...")
+        print("    export STEPIK_CLIENT_SECRET=...")
         sys.exit(0)
 
     filepath = next((a for a in args if not a.startswith("--")), None)
@@ -718,12 +879,15 @@ def main():
         if idx + 1 < len(args) and not args[idx + 1].startswith("--"):
             keys_file = args[idx + 1]
         else:
-            print("❌ После --keys укажите путь к файлу.")
+            print("❌ После --keys укажите путь к файлу (например: --keys keys.env).")
             sys.exit(1)
 
-    if not dry_run and keys_file is None:
-        print("❌ Для загрузки нужен файл ключей: --keys keys.env")
-        print("   Для предпросмотра используйте: --dry-run")
+    if not dry_run and keys_file is None and \
+            not os.environ.get("STEPIK_CLIENT_ID"):
+        print("❌ Для загрузки нужны API-ключи.")
+        print("   Передайте через: --keys keys.env")
+        print("   или через переменные окружения STEPIK_CLIENT_ID / STEPIK_CLIENT_SECRET")
+        print("   Для предпросмотра без загрузки используйте: --dry-run")
         sys.exit(1)
 
     if not Path(filepath).exists():
@@ -744,7 +908,9 @@ def main():
         sys.exit(0)
 
     print("\n🔑 Получаю токен...")
-    token = get_token()
+    # [BUG-01] Загружаем credentials и передаём явно
+    client_id, client_secret = load_credentials(keys_file)
+    token = get_token(client_id, client_secret)
 
     course_id, stats = upload_course(token, course_data)
 
