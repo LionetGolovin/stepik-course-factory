@@ -250,7 +250,7 @@ def create_sorting_step(token, lesson_id, position, question_html, options_order
 
 def create_matching_step(token, lesson_id, position, question_html, pairs,
                          shuffle_rows=False):
-    source = {"pairs": [{"first": p["first"], "second": p["second"]} for p in pairs]}
+    source = {"pairs": [{"first": p["first"], "second": p["second"]} for p in pairs], "preserve_firsts_order": True, "preserve_seconds_order": False}
     if shuffle_rows:
         source["is_options_feedback"] = False
         source["preserve_order"] = False
