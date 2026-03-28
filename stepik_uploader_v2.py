@@ -221,7 +221,7 @@ def create_string_step(token, lesson_id, position, question_html,
     block = {
         "name": "string",
         "text": question_html,
-        "source": {"pattern": pattern, "case_sensitive": case_sensitive, "code": ""}
+        "source": {"pattern": pattern, "case_sensitive": case_sensitive, "code": "", "use_re": False}
     }
     return _post_step(token, _step_base(lesson_id, position, block))
 
