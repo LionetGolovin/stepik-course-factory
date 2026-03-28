@@ -490,7 +490,7 @@ def parse_fill_blanks(body):
         else:
             key     = part
             answers = blanks.get(key, [key])
-            components.append({"type": "input", "text": "", "options": [{"text": answers[0], "is_correct": True}] + [{"text": a, "is_correct": False} for a in answers[1:]]})
+            components.append({"type": "input", "text": "", "options": [{"text": answers[0], "is_correct": True, "is_case_sensitive": False}] + [{"text": a, "is_correct": False, "is_case_sensitive": False} for a in answers[1:]]})
 
     return "", components
 
