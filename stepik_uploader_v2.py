@@ -243,7 +243,7 @@ def create_sorting_step(token, lesson_id, position, question_html, options_order
     block = {
         "name": "sorting",
         "text": question_html,
-        "source": {"options": options_ordered}
+        "source": {"options": [{"text": o} for o in options_ordered]}
     }
     return _post_step(token, _step_base(lesson_id, position, block))
 
