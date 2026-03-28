@@ -262,7 +262,7 @@ def create_fill_blanks_step(token, lesson_id, position, question_html, component
     block = {
         "name": "fill-blanks",
         "text": question_html,
-        "source": {"components": components}
+        "source": {"components": components, "is_case_sensitive": False}
     }
     return _post_step(token, _step_base(lesson_id, position, block))
 
