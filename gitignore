@@ -1,0 +1,18 @@
+# Ключи API — никогда не загружать на GitHub!
+keys.env
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.uv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
